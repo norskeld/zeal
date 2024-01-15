@@ -3,6 +3,10 @@ resolver = "2"
 members = ["crates/*"]
 default-members = ["crates/zeal"]
 
+[workspace.dependencies]
+pretty_assertions = "1.4.0"
+indoc = "2.0.4"
+
 [profile.release]
 lto = "thin"
 panic = "abort"
