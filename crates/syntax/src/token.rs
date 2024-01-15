@@ -211,27 +211,23 @@ impl TokenKind {
 pub struct Token {
   pub kind: TokenKind,
   pub value: String,
-  pub location: Span,
+  pub span: Span,
 }
 
 impl Token {
-  pub fn new(kind: TokenKind, value: String, location: Span) -> Self {
-    Self {
-      kind,
-      value,
-      location,
-    }
+  pub fn new(kind: TokenKind, value: String, span: Span) -> Self {
+    Self { kind, value, span }
   }
 
   /// Returns a token signalling unexpected input. The token contains the invalid character.
-  pub fn invalid(value: String, location: Span) -> Self {
-    Self::new(TokenKind::Invalid, value, location)
+  pub fn invalid(value: String, span: Span) -> Self {
+    Self::new(TokenKind::Invalid, value, span)
   }
 
   /// Returns a token that signals the end of the input stream. Using null tokens so we don't need
   /// to wrap/unwrap every token in [Option].
-  pub fn null(location: Span) -> Self {
-    Self::new(TokenKind::Null, String::new(), location)
+  pub fn null(span: Span) -> Self {
+    Self::new(TokenKind::Null, String::new(), span)
   }
 
   pub fn is_keyword(&self) -> bool {
@@ -303,6 +299,6 @@ impl Token {
   }
 
   pub fn same_line_as(&self, token: &Token) -> bool {
-    self.location.lines.start() == token.location.lines.start()
+    self.span.lines.start() == token.span.lines.start()
   }
 }

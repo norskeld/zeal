@@ -866,10 +866,6 @@ impl Scanner {
         | ZERO..=NINE | LOWER_A..=LOWER_Z | UPPER_A..=UPPER_Z | UNDERSCORE | DOLLAR => {
           self.position += 1
         },
-        // | QUESTION => {
-        //   self.position += 1;
-        //   break;
-        // },
         | _ => break,
       }
     }
