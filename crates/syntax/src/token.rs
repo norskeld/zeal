@@ -299,6 +299,6 @@ impl Token {
   }
 
   pub fn same_line_as(&self, token: &Token) -> bool {
-    self.span.lines.start() == token.span.lines.start()
+    self.span.lines.start == token.span.lines.start
   }
 }

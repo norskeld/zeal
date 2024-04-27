@@ -60,7 +60,6 @@ enum State {
   Default,
   SingleString,
   DoubleString,
-  LineContinuation,
 }
 
 pub struct Scanner {
@@ -72,7 +71,7 @@ pub struct Scanner {
   position: usize,
   /// The number of opening braces that have yet to be closed.
   braces: usize,
-  // The stack of brace counts to use for determining when a string expression should be closed.
+  /// The stack of brace counts to use for determining when a string expression should be closed.
   braces_stack: Vec<usize>,
   /// The stack of scanning states.
   states: Vec<State>,
@@ -91,7 +90,7 @@ impl Scanner {
       max_position: max,
       position: 0,
       braces: 0,
-      braces_stack: Vec::new(),
+      braces_stack: vec![],
       states: vec![State::Default],
       line: 1,
       column: 1,
@@ -99,17 +98,13 @@ impl Scanner {
   }
 
   pub fn initial_span(&self) -> Span {
-    Span::new(self.line..=self.line, self.column..=self.column)
+    Span::new(self.line..self.line, self.column..self.column)
   }
 
   pub fn next_token(&mut self) -> Token {
     match self.states.last().cloned() {
       | Some(State::SingleString) => self.next_single_string_token(),
       | Some(State::DoubleString) => self.next_double_string_token(),
-      | Some(State::LineContinuation) => {
-        self.consume_escaped_whitespace();
-        self.next_token()
-      },
       | _ => self.next_ordinary_token(),
     }
   }
@@ -125,7 +120,7 @@ impl Scanner {
   }
 
   fn span(&self, start_line: usize, start_column: usize) -> Span {
-    Span::new(start_line..=self.line, start_column..=(self.column - 1))
+    Span::new(start_line..self.line, start_column..self.column)
   }
 
   fn current_byte(&self) -> u8 {
@@ -703,10 +698,6 @@ impl Scanner {
         | BACKSLASH => {
           let next = self.next_byte();
 
-          if self.enter_escaped_whitespace(next) {
-            break;
-          }
-
           if self.replace_escape_sequence(&mut buffer, next, &SINGLE_ESCAPES) {
             continue;
           }
@@ -753,10 +744,6 @@ impl Scanner {
 
           let next = self.next_byte();
 
-          if self.enter_escaped_whitespace(next) {
-            break;
-          }
-
           if self.replace_escape_sequence(&mut buffer, next, &DOUBLE_ESCAPES) {
             continue;
           }
@@ -792,29 +779,6 @@ impl Scanner {
     self.braces += 1;
 
     self.single_character_token(TokenKind::StringExprOpen)
-  }
-
-  fn enter_escaped_whitespace(&mut self, byte: u8) -> bool {
-    if !self.is_whitespace(byte) {
-      return false;
-    }
-
-    self.advance_char();
-    self.enter_state(State::LineContinuation);
-
-    true
-  }
-
-  fn consume_escaped_whitespace(&mut self) {
-    loop {
-      match self.current_byte() {
-        | SPACE | TAB | CARRIAGE_RETURN => self.advance_char(),
-        | NEWLINE => self.advance_line(),
-        | _ => break,
-      }
-    }
-
-    self.leave_state();
   }
 
   fn replace_escape_sequence(
@@ -861,18 +825,11 @@ impl Scanner {
   }
 
   fn advance_identifier_bytes(&mut self) {
-    loop {
-      match self.current_byte() {
-        | ZERO..=NINE | LOWER_A..=LOWER_Z | UPPER_A..=UPPER_Z | UNDERSCORE | DOLLAR => {
-          self.position += 1
-        },
-        | _ => break,
-      }
+    while let ZERO..=NINE | LOWER_A..=LOWER_Z | UPPER_A..=UPPER_Z | UNDERSCORE | DOLLAR =
+      self.current_byte()
+    {
+      self.position += 1
     }
-  }
-
-  fn is_whitespace(&self, byte: u8) -> bool {
-    matches!(byte, SPACE | TAB | CARRIAGE_RETURN | NEWLINE)
   }
 
   fn next_is_unicode_escape(&self) -> bool {
@@ -964,14 +921,12 @@ impl Scanner {
   fn null(&self) -> Token {
     // When we encounter the end of the input, we want the location to point to the last column that
     // came before it. This way any errors are reported within the bounds of the column range.
-    let lines = self.line..=self.line;
+    let lines = self.line..self.line;
 
     let span = if self.column == 1 {
-      Span::new(lines, 1..=1)
+      Span::new(lines, 1..1)
     } else {
-      let column = self.column - 1;
-
-      Span::new(lines, column..=column)
+      Span::new(lines, self.column..self.column)
     };
 
     Token::null(span)
@@ -980,7 +935,7 @@ impl Scanner {
 
 #[cfg(test)]
 mod tests {
-  use std::ops::RangeInclusive;
+  use std::ops::Range;
 
   use pretty_assertions::assert_eq;
 
@@ -991,16 +946,11 @@ mod tests {
     Scanner::new(Vec::from(input))
   }
 
-  fn span(lines: RangeInclusive<usize>, cols: RangeInclusive<usize>) -> Span {
+  fn span(lines: Range<usize>, cols: Range<usize>) -> Span {
     Span::new(lines, cols)
   }
 
-  fn token(
-    kind: TokenKind,
-    value: &str,
-    lines: RangeInclusive<usize>,
-    cols: RangeInclusive<usize>,
-  ) -> Token {
+  fn token(kind: TokenKind, value: &str, lines: Range<usize>, cols: Range<usize>) -> Token {
     Token::new(kind, value.to_string(), span(lines, cols))
   }
 
@@ -1040,67 +990,67 @@ mod tests {
 
   #[test]
   fn test_is_keyword() {
-    assert!(token(TokenKind::As, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Async, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Break, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Builtin, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Case, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Else, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Enum, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::False, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Fn, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::For, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::If, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Impl, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Iso, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Let, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Loop, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Match, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Move, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Mut, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Next, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Pub, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Recover, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Ref, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Return, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::SelfValue, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Struct, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Trait, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::True, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Try, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::Use, "", 1..=1, 1..=1).is_keyword());
-    assert!(token(TokenKind::While, "", 1..=1, 1..=1).is_keyword());
+    assert!(token(TokenKind::As, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Async, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Break, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Builtin, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Case, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Else, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Enum, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::False, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Fn, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::For, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::If, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Impl, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Iso, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Let, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Loop, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Match, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Move, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Mut, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Next, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Pub, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Recover, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Ref, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Return, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::SelfValue, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Struct, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Trait, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::True, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Try, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::Use, "", 1..1, 1..1).is_keyword());
+    assert!(token(TokenKind::While, "", 1..1, 1..1).is_keyword());
   }
 
   #[test]
   fn test_is_operator() {
-    assert!(token(TokenKind::Add, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::And, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::BitAnd, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::BitOr, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::BitXor, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::Div, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::Eq, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::Ge, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::Gt, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::Le, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::Lt, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::Mod, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::Mul, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::Ne, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::Or, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::Pow, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::Shl, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::Shr, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::Sub, "", 1..=1, 1..=1).is_operator());
-    assert!(token(TokenKind::UnsignedShr, "", 1..=1, 1..=1).is_operator());
+    assert!(token(TokenKind::Add, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::And, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::BitAnd, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::BitOr, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::BitXor, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::Div, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::Eq, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::Ge, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::Gt, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::Le, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::Lt, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::Mod, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::Mul, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::Ne, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::Or, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::Pow, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::Shl, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::Shr, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::Sub, "", 1..1, 1..1).is_operator());
+    assert!(token(TokenKind::UnsignedShr, "", 1..1, 1..1).is_operator());
   }
 
   #[test]
   fn test_token_same_line_as() {
-    let token1 = token(TokenKind::As, "", 1..=1, 1..=1);
-    let token2 = token(TokenKind::As, "", 1..=1, 1..=1);
-    let token3 = token(TokenKind::As, "", 2..=2, 1..=1);
+    let token1 = token(TokenKind::As, "", 1..1, 1..1);
+    let token2 = token(TokenKind::As, "", 1..1, 1..1);
+    let token3 = token(TokenKind::As, "", 2..2, 1..1);
 
     assert!(token1.same_line_as(&token2));
     assert!(!token1.same_line_as(&token3));
@@ -1108,88 +1058,88 @@ mod tests {
 
   #[test]
   fn test_integer() {
-    assert_token!("10", Integer, "10", 1..=1, 1..=2);
-    assert_token!("10x", Integer, "10", 1..=1, 1..=2);
-    assert_token!("10_20_30", Integer, "10_20_30", 1..=1, 1..=8);
-    assert_token!("0xaf", Integer, "0xaf", 1..=1, 1..=4);
-    assert_token!("0xFF", Integer, "0xFF", 1..=1, 1..=4);
-    assert_token!("0xF_F", Integer, "0xF_F", 1..=1, 1..=5);
-    assert_token!("10Ea", Integer, "10", 1..=1, 1..=2);
-    assert_token!("10.+5", Integer, "10", 1..=1, 1..=2);
+    assert_token!("10", Integer, "10", 1..1, 1..3);
+    assert_token!("10x", Integer, "10", 1..1, 1..3);
+    assert_token!("10_20_30", Integer, "10_20_30", 1..1, 1..9);
+    assert_token!("0xaf", Integer, "0xaf", 1..1, 1..5);
+    assert_token!("0xFF", Integer, "0xFF", 1..1, 1..5);
+    assert_token!("0xF_F", Integer, "0xF_F", 1..1, 1..6);
+    assert_token!("10Ea", Integer, "10", 1..1, 1..3);
+    assert_token!("10.+5", Integer, "10", 1..1, 1..3);
   }
 
   #[test]
   fn test_float() {
-    assert_token!("10.5", Float, "10.5", 1..=1, 1..=4);
-    assert_token!("10.5x", Float, "10.5", 1..=1, 1..=4);
-    assert_token!("10e5", Float, "10e5", 1..=1, 1..=4);
-    assert_token!("10E5", Float, "10E5", 1..=1, 1..=4);
-    assert_token!("10.2e5", Float, "10.2e5", 1..=1, 1..=6);
-    assert_token!("1_0.2e5", Float, "1_0.2e5", 1..=1, 1..=7);
-    assert_token!("10e+5", Float, "10e+5", 1..=1, 1..=5);
-    assert_token!("10e-5", Float, "10e-5", 1..=1, 1..=5);
-    assert_token!("10E+5", Float, "10E+5", 1..=1, 1..=5);
-    assert_token!("10E-5", Float, "10E-5", 1..=1, 1..=5);
-    assert_token!("1_000_000_000.0", Float, "1_000_000_000.0", 1..=1, 1..=15);
+    assert_token!("10.5", Float, "10.5", 1..1, 1..5);
+    assert_token!("10.5x", Float, "10.5", 1..1, 1..5);
+    assert_token!("10e5", Float, "10e5", 1..1, 1..5);
+    assert_token!("10E5", Float, "10E5", 1..1, 1..5);
+    assert_token!("10.2e5", Float, "10.2e5", 1..1, 1..7);
+    assert_token!("1_0.2e5", Float, "1_0.2e5", 1..1, 1..8);
+    assert_token!("10e+5", Float, "10e+5", 1..1, 1..6);
+    assert_token!("10e-5", Float, "10e-5", 1..1, 1..6);
+    assert_token!("10E+5", Float, "10E+5", 1..1, 1..6);
+    assert_token!("10E-5", Float, "10E-5", 1..1, 1..6);
+    assert_token!("1_000_000_000.0", Float, "1_000_000_000.0", 1..1, 1..16);
   }
 
   #[test]
   fn test_comment() {
-    assert_token!("//foo", Comment, "foo", 1..=1, 1..=5);
-    assert_token!("// foo", Comment, "foo", 1..=1, 1..=6);
-    assert_token!("// foo\nbar", Comment, "foo", 1..=1, 1..=6);
-    assert_token!("// €€€", Comment, "€€€", 1..=1, 1..=6);
+    assert_token!("//foo", Comment, "foo", 1..1, 1..6);
+    assert_token!("// foo", Comment, "foo", 1..1, 1..7);
+    assert_token!("// foo\nbar", Comment, "foo", 1..1, 1..7);
+    assert_token!("// €€€", Comment, "€€€", 1..1, 1..7);
   }
 
   #[test]
   fn test_braces() {
-    assert_token!("{", BraceOpen, "{", 1..=1, 1..=1);
-    assert_token!("}", BraceClose, "}", 1..=1, 1..=1);
+    assert_token!("{", BraceOpen, "{", 1..1, 1..2);
+    assert_token!("}", BraceClose, "}", 1..1, 1..2);
   }
 
   #[test]
   fn test_brace_balancing() {
     let mut lexer = scanner("{}");
 
-    assert_eq!(lexer.next_token(), token(BraceOpen, "{", 1..=1, 1..=1));
-    assert_eq!(lexer.next_token(), token(BraceClose, "}", 1..=1, 2..=2));
+    assert_eq!(lexer.next_token(), token(BraceOpen, "{", 1..1, 1..2));
+    assert_eq!(lexer.next_token(), token(BraceClose, "}", 1..1, 2..3));
   }
 
   #[test]
   fn test_parentheses() {
-    assert_token!("(", ParenOpen, "(", 1..=1, 1..=1);
-    assert_token!(")", ParenClose, ")", 1..=1, 1..=1);
+    assert_token!("(", ParenOpen, "(", 1..1, 1..2);
+    assert_token!(")", ParenClose, ")", 1..1, 1..2);
   }
 
   #[test]
   fn test_parentheses_balancing() {
     let mut scanner = scanner("()");
 
-    assert_eq!(scanner.next_token(), token(ParenOpen, "(", 1..=1, 1..=1));
-    assert_eq!(scanner.next_token(), token(ParenClose, ")", 1..=1, 2..=2));
+    assert_eq!(scanner.next_token(), token(ParenOpen, "(", 1..1, 1..2));
+    assert_eq!(scanner.next_token(), token(ParenClose, ")", 1..1, 2..3));
   }
 
   #[test]
   fn text_scanner_whitespace() {
-    assert_token!("\t", Whitespace, "\t", 1..=1, 1..=1);
-    assert_token!(" ", Whitespace, " ", 1..=1, 1..=1);
-    assert_token!("\r", Whitespace, "\r", 1..=1, 1..=1);
+    assert_token!("\t", Whitespace, "\t", 1..1, 1..2);
+    assert_token!(" ", Whitespace, " ", 1..1, 1..2);
+    assert_token!("\r", Whitespace, "\r", 1..1, 1..2);
     assert_tokens!(
       " 10 \t\r",
-      token(Whitespace, " ", 1..=1, 1..=1),
-      token(Integer, "10", 1..=1, 2..=3),
-      token(Whitespace, " \t\r", 1..=1, 4..=6)
+      token(Whitespace, " ", 1..1, 1..2),
+      token(Integer, "10", 1..1, 2..4),
+      token(Whitespace, " \t\r", 1..1, 4..7)
     );
     assert_tokens!(
       "\n10\n",
-      token(Whitespace, "\n", 1..=1, 1..=1),
-      token(Integer, "10", 2..=2, 1..=2),
-      token(Whitespace, "\n", 2..=2, 3..=3)
+      token(Whitespace, "\n", 1..1, 1..2),
+      token(Integer, "10", 2..2, 1..3),
+      token(Whitespace, "\n", 2..2, 3..4)
     );
     assert_tokens!(
       " \n ",
-      token(Whitespace, " \n", 1..=1, 1..=2),
-      token(Whitespace, " ", 2..=2, 1..=1)
+      token(Whitespace, " \n", 1..1, 1..3),
+      token(Whitespace, " ", 2..2, 1..2)
     );
   }
 
@@ -1197,77 +1147,77 @@ mod tests {
   fn test_single_quoted_string() {
     assert_tokens!(
       "''",
-      token(SingleStringOpen, "'", 1..=1, 1..=1),
-      token(SingleStringClose, "'", 1..=1, 2..=2)
+      token(SingleStringOpen, "'", 1..1, 1..2),
+      token(SingleStringClose, "'", 1..1, 2..3)
     );
     assert_tokens!(
       "'foo'",
-      token(SingleStringOpen, "'", 1..=1, 1..=1),
-      token(StringText, "foo", 1..=1, 2..=4),
-      token(SingleStringClose, "'", 1..=1, 5..=5)
+      token(SingleStringOpen, "'", 1..1, 1..2),
+      token(StringText, "foo", 1..1, 2..5),
+      token(SingleStringClose, "'", 1..1, 5..6)
     );
     assert_tokens!(
       "'\nfoo'",
-      token(SingleStringOpen, "'", 1..=1, 1..=1),
-      token(StringText, "\n", 1..=1, 2..=2),
-      token(StringText, "foo", 2..=2, 1..=3),
-      token(SingleStringClose, "'", 2..=2, 4..=4)
+      token(SingleStringOpen, "'", 1..1, 1..2),
+      token(StringText, "\n", 1..1, 2..3),
+      token(StringText, "foo", 2..2, 1..4),
+      token(SingleStringClose, "'", 2..2, 4..5)
     );
     assert_tokens!(
       "'foo\nbar'",
-      token(SingleStringOpen, "'", 1..=1, 1..=1),
-      token(StringText, "foo\n", 1..=1, 2..=5),
-      token(StringText, "bar", 2..=2, 1..=3),
-      token(SingleStringClose, "'", 2..=2, 4..=4)
+      token(SingleStringOpen, "'", 1..1, 1..2),
+      token(StringText, "foo\n", 1..1, 2..6),
+      token(StringText, "bar", 2..2, 1..4),
+      token(SingleStringClose, "'", 2..2, 4..5)
     );
     assert_tokens!(
       "'foo\n'",
-      token(SingleStringOpen, "'", 1..=1, 1..=1),
-      token(StringText, "foo\n", 1..=1, 2..=5),
-      token(SingleStringClose, "'", 2..=2, 1..=1)
+      token(SingleStringOpen, "'", 1..1, 1..2),
+      token(StringText, "foo\n", 1..1, 2..6),
+      token(SingleStringClose, "'", 2..2, 1..2)
     );
     assert_tokens!(
       "'foo\n '",
-      token(SingleStringOpen, "'", 1..=1, 1..=1),
-      token(StringText, "foo\n", 1..=1, 2..=5),
-      token(StringText, " ", 2..=2, 1..=1),
-      token(SingleStringClose, "'", 2..=2, 2..=2)
+      token(SingleStringOpen, "'", 1..1, 1..2),
+      token(StringText, "foo\n", 1..1, 2..6),
+      token(StringText, " ", 2..2, 1..2),
+      token(SingleStringClose, "'", 2..2, 2..3)
     );
     assert_tokens!(
       "'foo\\xbar'",
-      token(SingleStringOpen, "'", 1..=1, 1..=1),
-      token(StringText, "foo\\xbar", 1..=1, 2..=9),
-      token(SingleStringClose, "'", 1..=1, 10..=10)
+      token(SingleStringOpen, "'", 1..1, 1..2),
+      token(StringText, "foo\\xbar", 1..1, 2..10),
+      token(SingleStringClose, "'", 1..1, 10..11)
     );
     assert_tokens!(
       "'foo\\'bar'",
-      token(SingleStringOpen, "'", 1..=1, 1..=1),
-      token(StringText, "foo\'bar", 1..=1, 2..=9),
-      token(SingleStringClose, "'", 1..=1, 10..=10)
+      token(SingleStringOpen, "'", 1..1, 1..2),
+      token(StringText, "foo\'bar", 1..1, 2..10),
+      token(SingleStringClose, "'", 1..1, 10..11)
     );
     assert_tokens!(
       "'foo\\\\bar'",
-      token(SingleStringOpen, "'", 1..=1, 1..=1),
-      token(StringText, "foo\\bar", 1..=1, 2..=9),
-      token(SingleStringClose, "'", 1..=1, 10..=10)
+      token(SingleStringOpen, "'", 1..1, 1..2),
+      token(StringText, "foo\\bar", 1..1, 2..10),
+      token(SingleStringClose, "'", 1..1, 10..11)
     );
     assert_tokens!(
       "'foo\\nbar'",
-      token(SingleStringOpen, "'", 1..=1, 1..=1),
-      token(StringText, "foo\\nbar", 1..=1, 2..=9),
-      token(SingleStringClose, "'", 1..=1, 10..=10)
+      token(SingleStringOpen, "'", 1..1, 1..2),
+      token(StringText, "foo\\nbar", 1..1, 2..10),
+      token(SingleStringClose, "'", 1..1, 10..11)
     );
     assert_tokens!(
       "'\u{65}\u{301}'",
-      token(SingleStringOpen, "'", 1..=1, 1..=1),
-      token(StringText, "\u{65}\u{301}", 1..=1, 2..=2),
-      token(SingleStringClose, "'", 1..=1, 3..=3)
+      token(SingleStringOpen, "'", 1..1, 1..2),
+      token(StringText, "\u{65}\u{301}", 1..1, 2..3),
+      token(SingleStringClose, "'", 1..1, 3..4)
     );
-    assert_tokens!("'", token(SingleStringOpen, "'", 1..=1, 1..=1));
+    assert_tokens!("'", token(SingleStringOpen, "'", 1..1, 1..2));
     assert_tokens!(
       "'foo",
-      token(SingleStringOpen, "'", 1..=1, 1..=1),
-      token(StringText, "foo", 1..=1, 2..=4)
+      token(SingleStringOpen, "'", 1..1, 1..2),
+      token(StringText, "foo", 1..1, 2..5)
     );
   }
 
@@ -1275,95 +1225,95 @@ mod tests {
   fn test_double_quoted_string() {
     assert_tokens!(
       "\"\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(DoubleStringClose, "\"", 1..=1, 2..=2)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(DoubleStringClose, "\"", 1..1, 2..3)
     );
     assert_tokens!(
       "\"foo\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "foo", 1..=1, 2..=4),
-      token(DoubleStringClose, "\"", 1..=1, 5..=5)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "foo", 1..1, 2..5),
+      token(DoubleStringClose, "\"", 1..1, 5..6)
     );
     assert_tokens!(
       "\"\nfoo\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "\n", 1..=1, 2..=2),
-      token(StringText, "foo", 2..=2, 1..=3),
-      token(DoubleStringClose, "\"", 2..=2, 4..=4)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "\n", 1..1, 2..3),
+      token(StringText, "foo", 2..2, 1..4),
+      token(DoubleStringClose, "\"", 2..2, 4..5)
     );
     assert_tokens!(
       "\"foo\nbar\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "foo\n", 1..=1, 2..=5),
-      token(StringText, "bar", 2..=2, 1..=3),
-      token(DoubleStringClose, "\"", 2..=2, 4..=4)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "foo\n", 1..1, 2..6),
+      token(StringText, "bar", 2..2, 1..4),
+      token(DoubleStringClose, "\"", 2..2, 4..5)
     );
     assert_tokens!(
       "\"foo\n\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "foo\n", 1..=1, 2..=5),
-      token(DoubleStringClose, "\"", 2..=2, 1..=1)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "foo\n", 1..1, 2..6),
+      token(DoubleStringClose, "\"", 2..2, 1..2)
     );
     assert_tokens!(
       "\"foo\n \"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "foo\n", 1..=1, 2..=5),
-      token(StringText, " ", 2..=2, 1..=1),
-      token(DoubleStringClose, "\"", 2..=2, 2..=2)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "foo\n", 1..1, 2..6),
+      token(StringText, " ", 2..2, 1..2),
+      token(DoubleStringClose, "\"", 2..2, 2..3)
     );
     assert_tokens!(
       "\"foo\\xbar\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "foo\\xbar", 1..=1, 2..=9),
-      token(DoubleStringClose, "\"", 1..=1, 10..=10)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "foo\\xbar", 1..1, 2..10),
+      token(DoubleStringClose, "\"", 1..1, 10..11)
     );
     assert_tokens!(
       "\"foo\\\"bar\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "foo\"bar", 1..=1, 2..=9),
-      token(DoubleStringClose, "\"", 1..=1, 10..=10)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "foo\"bar", 1..1, 2..10),
+      token(DoubleStringClose, "\"", 1..1, 10..11)
     );
     assert_tokens!(
       "\"foo\\\\bar\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "foo\\bar", 1..=1, 2..=9),
-      token(DoubleStringClose, "\"", 1..=1, 10..=10)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "foo\\bar", 1..1, 2..10),
+      token(DoubleStringClose, "\"", 1..1, 10..11)
     );
     assert_tokens!(
       "\"foo\\nbar\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "foo\nbar", 1..=1, 2..=9),
-      token(DoubleStringClose, "\"", 1..=1, 10..=10)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "foo\nbar", 1..1, 2..10),
+      token(DoubleStringClose, "\"", 1..1, 10..11)
     );
     assert_tokens!(
       "\"foo\\tbar\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "foo\tbar", 1..=1, 2..=9),
-      token(DoubleStringClose, "\"", 1..=1, 10..=10)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "foo\tbar", 1..1, 2..10),
+      token(DoubleStringClose, "\"", 1..1, 10..11)
     );
     assert_tokens!(
       "\"foo\\rbar\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "foo\rbar", 1..=1, 2..=9),
-      token(DoubleStringClose, "\"", 1..=1, 10..=10)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "foo\rbar", 1..1, 2..10),
+      token(DoubleStringClose, "\"", 1..1, 10..11)
     );
     assert_tokens!(
       "\"\u{65}\u{301}\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "\u{65}\u{301}", 1..=1, 2..=2),
-      token(DoubleStringClose, "\"", 1..=1, 3..=3)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "\u{65}\u{301}", 1..1, 2..3),
+      token(DoubleStringClose, "\"", 1..1, 3..4)
     );
-    assert_tokens!("\"", token(DoubleStringOpen, "\"", 1..=1, 1..=1));
+    assert_tokens!("\"", token(DoubleStringOpen, "\"", 1..1, 1..2));
     assert_tokens!(
       "\"foo",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "foo", 1..=1, 2..=4)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "foo", 1..1, 2..5)
     );
     assert_tokens!(
       "\"\\{}\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "{}", 1..=1, 2..=4),
-      token(DoubleStringClose, "\"", 1..=1, 5..=5)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "{}", 1..1, 2..5),
+      token(DoubleStringClose, "\"", 1..1, 5..6)
     );
   }
 
@@ -1371,71 +1321,71 @@ mod tests {
   fn test_double_string_unicode_escapes() {
     assert_tokens!(
       "\"\\u{AC}\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(UnicodeEscape, "\u{AC}", 1..=1, 2..=7),
-      token(DoubleStringClose, "\"", 1..=1, 8..=8)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(UnicodeEscape, "\u{AC}", 1..1, 2..8),
+      token(DoubleStringClose, "\"", 1..1, 8..9)
     );
     assert_tokens!(
       "\"a\\u{AC}b\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "a", 1..=1, 2..=2),
-      token(UnicodeEscape, "\u{AC}", 1..=1, 3..=8),
-      token(StringText, "b", 1..=1, 9..=9),
-      token(DoubleStringClose, "\"", 1..=1, 10..=10)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "a", 1..1, 2..3),
+      token(UnicodeEscape, "\u{AC}", 1..1, 3..9),
+      token(StringText, "b", 1..1, 9..10),
+      token(DoubleStringClose, "\"", 1..1, 10..11)
     );
     assert_tokens!(
       "\"a\\u{FFFFF}b\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "a", 1..=1, 2..=2),
-      token(UnicodeEscape, "\u{FFFFF}", 1..=1, 3..=11),
-      token(StringText, "b", 1..=1, 12..=12),
-      token(DoubleStringClose, "\"", 1..=1, 13..=13)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "a", 1..1, 2..3),
+      token(UnicodeEscape, "\u{FFFFF}", 1..1, 3..12),
+      token(StringText, "b", 1..1, 12..13),
+      token(DoubleStringClose, "\"", 1..1, 13..14)
     );
     assert_tokens!(
       "\"a\\u{10FFFF}b\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "a", 1..=1, 2..=2),
-      token(UnicodeEscape, "\u{10FFFF}", 1..=1, 3..=12),
-      token(StringText, "b", 1..=1, 13..=13),
-      token(DoubleStringClose, "\"", 1..=1, 14..=14)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "a", 1..1, 2..3),
+      token(UnicodeEscape, "\u{10FFFF}", 1..1, 3..13),
+      token(StringText, "b", 1..1, 13..14),
+      token(DoubleStringClose, "\"", 1..1, 14..15)
     );
     assert_tokens!(
       "\"a\\u{XXXXX}b\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "a", 1..=1, 2..=2),
-      token(InvalidEscape, "XXXXX", 1..=1, 3..=11),
-      token(StringText, "b", 1..=1, 12..=12),
-      token(DoubleStringClose, "\"", 1..=1, 13..=13)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "a", 1..1, 2..3),
+      token(InvalidEscape, "XXXXX", 1..1, 3..12),
+      token(StringText, "b", 1..1, 12..13),
+      token(DoubleStringClose, "\"", 1..1, 13..14)
     );
     assert_tokens!(
       "\"a\\u{FFFFFF}b\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "a", 1..=1, 2..=2),
-      token(InvalidEscape, "FFFFFF", 1..=1, 3..=12),
-      token(StringText, "b", 1..=1, 13..=13),
-      token(DoubleStringClose, "\"", 1..=1, 14..=14)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "a", 1..1, 2..3),
+      token(InvalidEscape, "FFFFFF", 1..1, 3..13),
+      token(StringText, "b", 1..1, 13..14),
+      token(DoubleStringClose, "\"", 1..1, 14..15)
     );
     assert_tokens!(
       "\"a\\u{AAAAA #}b\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "a", 1..=1, 2..=2),
-      token(InvalidEscape, "AAAAA #", 1..=1, 3..=13),
-      token(StringText, "b", 1..=1, 14..=14),
-      token(DoubleStringClose, "\"", 1..=1, 15..=15)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "a", 1..1, 2..3),
+      token(InvalidEscape, "AAAAA #", 1..1, 3..14),
+      token(StringText, "b", 1..1, 14..15),
+      token(DoubleStringClose, "\"", 1..1, 15..16)
     );
     assert_tokens!(
       "\"a\\u{€}b\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "a", 1..=1, 2..=2),
-      token(InvalidEscape, "€", 1..=1, 3..=7),
-      token(StringText, "b", 1..=1, 8..=8),
-      token(DoubleStringClose, "\"", 1..=1, 9..=9)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "a", 1..1, 2..3),
+      token(InvalidEscape, "€", 1..1, 3..8),
+      token(StringText, "b", 1..1, 8..9),
+      token(DoubleStringClose, "\"", 1..1, 9..10)
     );
     assert_tokens!(
       "\"\\u{AA\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(InvalidEscape, "AA", 1..=1, 2..=6),
-      token(DoubleStringClose, "\"", 1..=1, 7..=7)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(InvalidEscape, "AA", 1..1, 2..7),
+      token(DoubleStringClose, "\"", 1..1, 7..8)
     );
   }
 
@@ -1443,25 +1393,25 @@ mod tests {
   fn test_double_string_with_expressions() {
     assert_tokens!(
       "\"foo{10}baz\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "foo", 1..=1, 2..=4),
-      token(StringExprOpen, "{", 1..=1, 5..=5),
-      token(Integer, "10", 1..=1, 6..=7),
-      token(StringExprClose, "}", 1..=1, 8..=8),
-      token(StringText, "baz", 1..=1, 9..=11),
-      token(DoubleStringClose, "\"", 1..=1, 12..=12)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "foo", 1..1, 2..5),
+      token(StringExprOpen, "{", 1..1, 5..6),
+      token(Integer, "10", 1..1, 6..8),
+      token(StringExprClose, "}", 1..1, 8..9),
+      token(StringText, "baz", 1..1, 9..12),
+      token(DoubleStringClose, "\"", 1..1, 12..13)
     );
     assert_tokens!(
       "\"{\"{10}\"}\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringExprOpen, "{", 1..=1, 2..=2),
-      token(DoubleStringOpen, "\"", 1..=1, 3..=3),
-      token(StringExprOpen, "{", 1..=1, 4..=4),
-      token(Integer, "10", 1..=1, 5..=6),
-      token(StringExprClose, "}", 1..=1, 7..=7),
-      token(DoubleStringClose, "\"", 1..=1, 8..=8),
-      token(StringExprClose, "}", 1..=1, 9..=9),
-      token(DoubleStringClose, "\"", 1..=1, 10..=10)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringExprOpen, "{", 1..1, 2..3),
+      token(DoubleStringOpen, "\"", 1..1, 3..4),
+      token(StringExprOpen, "{", 1..1, 4..5),
+      token(Integer, "10", 1..1, 5..7),
+      token(StringExprClose, "}", 1..1, 7..8),
+      token(DoubleStringClose, "\"", 1..1, 8..9),
+      token(StringExprClose, "}", 1..1, 9..10),
+      token(DoubleStringClose, "\"", 1..1, 10..11)
     );
   }
 
@@ -1469,259 +1419,237 @@ mod tests {
   fn test_double_string_with_unclosed_expression() {
     assert_tokens!(
       "\"foo{10 +\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "foo", 1..=1, 2..=4),
-      token(StringExprOpen, "{", 1..=1, 5..=5),
-      token(Integer, "10", 1..=1, 6..=7),
-      token(Whitespace, " ", 1..=1, 8..=8),
-      token(Add, "+", 1..=1, 9..=9),
-      token(DoubleStringOpen, "\"", 1..=1, 10..=10)
-    );
-  }
-
-  #[test]
-  fn test_single_quoted_string_with_escaped_whitespace() {
-    assert_tokens!(
-      "'foo \\\n  bar'",
-      token(SingleStringOpen, "'", 1..=1, 1..=1),
-      token(StringText, "foo ", 1..=1, 2..=6),
-      token(StringText, "bar", 2..=2, 3..=5),
-      token(SingleStringClose, "'", 2..=2, 6..=6)
-    );
-  }
-
-  #[test]
-  fn test_double_quoted_string_with_escaped_whitespace() {
-    assert_tokens!(
-      "\"foo \\\n  bar\"",
-      token(DoubleStringOpen, "\"", 1..=1, 1..=1),
-      token(StringText, "foo ", 1..=1, 2..=6),
-      token(StringText, "bar", 2..=2, 3..=5),
-      token(DoubleStringClose, "\"", 2..=2, 6..=6)
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringText, "foo", 1..1, 2..5),
+      token(StringExprOpen, "{", 1..1, 5..6),
+      token(Integer, "10", 1..1, 6..8),
+      token(Whitespace, " ", 1..1, 8..9),
+      token(Add, "+", 1..1, 9..10),
+      token(DoubleStringOpen, "\"", 1..1, 10..11)
     );
   }
 
   #[test]
   fn test_colon() {
-    assert_token!(":", Colon, ":", 1..=1, 1..=1);
-    assert_token!("::", DoubleColon, "::", 1..=1, 1..=2);
-    assert_token!(":=", Replace, ":=", 1..=1, 1..=2);
+    assert_token!(":", Colon, ":", 1..1, 1..2);
+    assert_token!("::", DoubleColon, "::", 1..1, 1..3);
+    assert_token!(":=", Replace, ":=", 1..1, 1..3);
   }
 
   #[test]
   fn test_percent() {
-    assert_token!("%", Mod, "%", 1..=1, 1..=1);
-    assert_token!("%=", ModAssign, "%=", 1..=1, 1..=2);
+    assert_token!("%", Mod, "%", 1..1, 1..2);
+    assert_token!("%=", ModAssign, "%=", 1..1, 1..3);
   }
 
   #[test]
   fn test_slash() {
-    assert_token!("/", Div, "/", 1..=1, 1..=1);
-    assert_token!("/=", DivAssign, "/=", 1..=1, 1..=2);
+    assert_token!("/", Div, "/", 1..1, 1..2);
+    assert_token!("/=", DivAssign, "/=", 1..1, 1..3);
   }
 
   #[test]
   fn test_bitwise_xor() {
-    assert_token!("^", BitXor, "^", 1..=1, 1..=1);
-    assert_token!("^=", BitXorAssign, "^=", 1..=1, 1..=2);
+    assert_token!("^", BitXor, "^", 1..1, 1..2);
+    assert_token!("^=", BitXorAssign, "^=", 1..1, 1..3);
   }
 
   #[test]
   fn test_bitwise_and() {
-    assert_token!("&", BitAnd, "&", 1..=1, 1..=1);
-    assert_token!("&=", BitAndAssign, "&=", 1..=1, 1..=2);
+    assert_token!("&", BitAnd, "&", 1..1, 1..2);
+    assert_token!("&=", BitAndAssign, "&=", 1..1, 1..3);
   }
 
   #[test]
   fn test_bitwise_or() {
-    assert_token!("|", BitOr, "|", 1..=1, 1..=1);
-    assert_token!("|=", BitOrAssign, "|=", 1..=1, 1..=2);
+    assert_token!("|", BitOr, "|", 1..1, 1..2);
+    assert_token!("|=", BitOrAssign, "|=", 1..1, 1..3);
   }
 
   #[test]
   fn test_bool_operators() {
-    assert_tokens!("||", token(Or, "||", 1..=1, 1..=2));
-    assert_tokens!("&&", token(And, "&&", 1..=1, 1..=2));
+    assert_tokens!("||", token(Or, "||", 1..1, 1..3));
+    assert_tokens!("&&", token(And, "&&", 1..1, 1..3));
   }
 
   #[test]
   fn test_star() {
-    assert_token!("*", Mul, "*", 1..=1, 1..=1);
-    assert_token!("*=", MulAssign, "*=", 1..=1, 1..=2);
-    assert_token!("**", Pow, "**", 1..=1, 1..=2);
-    assert_token!("**=", PowAssign, "**=", 1..=1, 1..=3);
+    assert_token!("*", Mul, "*", 1..1, 1..2);
+    assert_token!("*=", MulAssign, "*=", 1..1, 1..3);
+    assert_token!("**", Pow, "**", 1..1, 1..3);
+    assert_token!("**=", PowAssign, "**=", 1..1, 1..4);
   }
 
   #[test]
   fn test_minus() {
-    assert_token!("-", Sub, "-", 1..=1, 1..=1);
-    assert_token!("-=", SubAssign, "-=", 1..=1, 1..=2);
-    assert_token!("->", Arrow, "->", 1..=1, 1..=2);
-    assert_tokens!("-10", token(Integer, "-10", 1..=1, 1..=3));
-    assert_tokens!("-10.5", token(Float, "-10.5", 1..=1, 1..=5));
+    assert_token!("-", Sub, "-", 1..1, 1..2);
+    assert_token!("-=", SubAssign, "-=", 1..1, 1..3);
+    assert_token!("->", Arrow, "->", 1..1, 1..3);
+    assert_tokens!("-10", token(Integer, "-10", 1..1, 1..4));
+    assert_tokens!("-10.5", token(Float, "-10.5", 1..1, 1..6));
     assert_tokens!(
       "10 - 20",
-      token(Integer, "10", 1..=1, 1..=2),
-      token(Whitespace, " ", 1..=1, 3..=3),
-      token(Sub, "-", 1..=1, 4..=4),
-      token(Whitespace, " ", 1..=1, 5..=5),
-      token(Integer, "20", 1..=1, 6..=7)
+      token(Integer, "10", 1..1, 1..3),
+      token(Whitespace, " ", 1..1, 3..4),
+      token(Sub, "-", 1..1, 4..5),
+      token(Whitespace, " ", 1..1, 5..6),
+      token(Integer, "20", 1..1, 6..8)
     );
   }
 
   #[test]
   fn test_plus() {
-    assert_token!("+", Add, "+", 1..=1, 1..=1);
-    assert_token!("+=", AddAssign, "+=", 1..=1, 1..=2);
+    assert_token!("+", Add, "+", 1..1, 1..2);
+    assert_token!("+=", AddAssign, "+=", 1..1, 1..3);
   }
 
   #[test]
   fn test_equal() {
-    assert_token!("=", Assign, "=", 1..=1, 1..=1);
-    assert_token!("==", Eq, "==", 1..=1, 1..=2);
-    assert_token!("=>", DoubleArrow, "=>", 1..=1, 1..=2);
+    assert_token!("=", Assign, "=", 1..1, 1..2);
+    assert_token!("==", Eq, "==", 1..1, 1..3);
+    assert_token!("=>", DoubleArrow, "=>", 1..1, 1..3);
   }
 
   #[test]
   fn test_less() {
-    assert_token!("<", Lt, "<", 1..=1, 1..=1);
-    assert_token!("<=", Le, "<=", 1..=1, 1..=2);
-    assert_token!("<<", Shl, "<<", 1..=1, 1..=2);
-    assert_token!("<<=", ShlAssign, "<<=", 1..=1, 1..=3);
+    assert_token!("<", Lt, "<", 1..1, 1..2);
+    assert_token!("<=", Le, "<=", 1..1, 1..3);
+    assert_token!("<<", Shl, "<<", 1..1, 1..3);
+    assert_token!("<<=", ShlAssign, "<<=", 1..1, 1..4);
   }
 
   #[test]
   fn test_greater() {
-    assert_token!(">", Gt, ">", 1..=1, 1..=1);
-    assert_token!(">=", Ge, ">=", 1..=1, 1..=2);
-    assert_token!(">>", Shr, ">>", 1..=1, 1..=2);
-    assert_token!(">>=", ShrAssign, ">>=", 1..=1, 1..=3);
-    assert_token!(">>>", UnsignedShr, ">>>", 1..=1, 1..=3);
-    assert_token!(">>>=", UnsignedShrAssign, ">>>=", 1..=1, 1..=4);
+    assert_token!(">", Gt, ">", 1..1, 1..2);
+    assert_token!(">=", Ge, ">=", 1..1, 1..3);
+    assert_token!(">>", Shr, ">>", 1..1, 1..3);
+    assert_token!(">>=", ShrAssign, ">>=", 1..1, 1..4);
+    assert_token!(">>>", UnsignedShr, ">>>", 1..1, 1..4);
+    assert_token!(">>>=", UnsignedShrAssign, ">>>=", 1..1, 1..5);
   }
 
   #[test]
   fn test_brackets() {
-    assert_token!("[", BracketOpen, "[", 1..=1, 1..=1);
-    assert_token!("]", BracketClose, "]", 1..=1, 1..=1);
+    assert_token!("[", BracketOpen, "[", 1..1, 1..2);
+    assert_token!("]", BracketClose, "]", 1..1, 1..2);
   }
 
   #[test]
   fn test_bang() {
-    assert_token!("!", Bang, "!", 1..=1, 1..=1);
-    assert_token!("!=", Ne, "!=", 1..=1, 1..=2);
+    assert_token!("!", Bang, "!", 1..1, 1..2);
+    assert_token!("!=", Ne, "!=", 1..1, 1..3);
   }
 
   #[test]
   fn test_dot() {
-    assert_token!(".", Dot, ".", 1..=1, 1..=1);
+    assert_token!(".", Dot, ".", 1..1, 1..2);
   }
 
   #[test]
   fn test_comma() {
-    assert_token!(",", Comma, ",", 1..=1, 1..=1);
+    assert_token!(",", Comma, ",", 1..1, 1..2);
   }
 
   #[test]
   fn test_keywords() {
-    assert_token!("as", As, "as", 1..=1, 1..=2);
-    assert_token!("fn", Fn, "fn", 1..=1, 1..=2);
-    assert_token!("if", If, "if", 1..=1, 1..=2);
+    assert_token!("as", As, "as", 1..1, 1..3);
+    assert_token!("fn", Fn, "fn", 1..1, 1..3);
+    assert_token!("if", If, "if", 1..1, 1..3);
 
-    assert_token!("for", For, "for", 1..=1, 1..=3);
-    assert_token!("iso", Iso, "iso", 1..=1, 1..=3);
-    assert_token!("let", Let, "let", 1..=1, 1..=3);
-    assert_token!("mut", Mut, "mut", 1..=1, 1..=3);
-    assert_token!("pub", Pub, "pub", 1..=1, 1..=3);
-    assert_token!("ref", Ref, "ref", 1..=1, 1..=3);
-    assert_token!("try", Try, "try", 1..=1, 1..=3);
-    assert_token!("use", Use, "use", 1..=1, 1..=3);
+    assert_token!("for", For, "for", 1..1, 1..4);
+    assert_token!("iso", Iso, "iso", 1..1, 1..4);
+    assert_token!("let", Let, "let", 1..1, 1..4);
+    assert_token!("mut", Mut, "mut", 1..1, 1..4);
+    assert_token!("pub", Pub, "pub", 1..1, 1..4);
+    assert_token!("ref", Ref, "ref", 1..1, 1..4);
+    assert_token!("try", Try, "try", 1..1, 1..4);
+    assert_token!("use", Use, "use", 1..1, 1..4);
 
-    assert_token!("case", Case, "case", 1..=1, 1..=4);
-    assert_token!("else", Else, "else", 1..=1, 1..=4);
-    assert_token!("enum", Enum, "enum", 1..=1, 1..=4);
-    assert_token!("impl", Impl, "impl", 1..=1, 1..=4);
-    assert_token!("loop", Loop, "loop", 1..=1, 1..=4);
-    assert_token!("move", Move, "move", 1..=1, 1..=4);
-    assert_token!("next", Next, "next", 1..=1, 1..=4);
-    assert_token!("Self", SelfType, "Self", 1..=1, 1..=4);
-    assert_token!("self", SelfValue, "self", 1..=1, 1..=4);
-    assert_token!("true", True, "true", 1..=1, 1..=4);
+    assert_token!("case", Case, "case", 1..1, 1..5);
+    assert_token!("else", Else, "else", 1..1, 1..5);
+    assert_token!("enum", Enum, "enum", 1..1, 1..5);
+    assert_token!("impl", Impl, "impl", 1..1, 1..5);
+    assert_token!("loop", Loop, "loop", 1..1, 1..5);
+    assert_token!("move", Move, "move", 1..1, 1..5);
+    assert_token!("next", Next, "next", 1..1, 1..5);
+    assert_token!("Self", SelfType, "Self", 1..1, 1..5);
+    assert_token!("self", SelfValue, "self", 1..1, 1..5);
+    assert_token!("true", True, "true", 1..1, 1..5);
 
-    assert_token!("async", Async, "async", 1..=1, 1..=5);
-    assert_token!("await", Await, "await", 1..=1, 1..=5);
-    assert_token!("break", Break, "break", 1..=1, 1..=5);
-    assert_token!("const", Const, "const", 1..=1, 1..=5);
-    assert_token!("false", False, "false", 1..=1, 1..=5);
-    assert_token!("match", Match, "match", 1..=1, 1..=5);
-    assert_token!("trait", Trait, "trait", 1..=1, 1..=5);
-    assert_token!("while", While, "while", 1..=1, 1..=5);
+    assert_token!("async", Async, "async", 1..1, 1..6);
+    assert_token!("await", Await, "await", 1..1, 1..6);
+    assert_token!("break", Break, "break", 1..1, 1..6);
+    assert_token!("const", Const, "const", 1..1, 1..6);
+    assert_token!("false", False, "false", 1..1, 1..6);
+    assert_token!("match", Match, "match", 1..1, 1..6);
+    assert_token!("trait", Trait, "trait", 1..1, 1..6);
+    assert_token!("while", While, "while", 1..1, 1..6);
 
-    assert_token!("extern", Extern, "extern", 1..=1, 1..=6);
-    assert_token!("return", Return, "return", 1..=1, 1..=6);
-    assert_token!("struct", Struct, "struct", 1..=1, 1..=6);
+    assert_token!("extern", Extern, "extern", 1..1, 1..7);
+    assert_token!("return", Return, "return", 1..1, 1..7);
+    assert_token!("struct", Struct, "struct", 1..1, 1..7);
 
-    assert_token!("builtin", Builtin, "builtin", 1..=1, 1..=7);
-    assert_token!("recover", Recover, "recover", 1..=1, 1..=7);
+    assert_token!("builtin", Builtin, "builtin", 1..1, 1..8);
+    assert_token!("recover", Recover, "recover", 1..1, 1..8);
   }
 
   #[test]
   fn test_identifiers() {
-    assert_token!("foo", Identifier, "foo", 1..=1, 1..=3);
-    assert_token!("foo$bar", Identifier, "foo$bar", 1..=1, 1..=7);
-    assert_token!("baz", Identifier, "baz", 1..=1, 1..=3);
-    assert_token!("foo_bar", Identifier, "foo_bar", 1..=1, 1..=7);
-    assert_token!("foo_BAR", Identifier, "foo_BAR", 1..=1, 1..=7);
-    assert_token!("foo_123", Identifier, "foo_123", 1..=1, 1..=7);
-    assert_token!("foo_123a", Identifier, "foo_123a", 1..=1, 1..=8);
-    assert_token!("foo_123a_", Identifier, "foo_123a_", 1..=1, 1..=9);
-    assert_token!("_foo_123a", Identifier, "_foo_123a", 1..=1, 1..=9);
-    assert_token!("__foo_123a", Identifier, "__foo_123a", 1..=1, 1..=10);
-    assert_token!("_", Identifier, "_", 1..=1, 1..=1);
-    assert_token!("__", Identifier, "__", 1..=1, 1..=2);
-    assert_token!("_0", Identifier, "_0", 1..=1, 1..=2);
-    assert_token!("_9", Identifier, "_9", 1..=1, 1..=2);
-    assert_token!("__1", Identifier, "__1", 1..=1, 1..=3);
+    assert_token!("foo", Identifier, "foo", 1..1, 1..4);
+    assert_token!("foo$bar", Identifier, "foo$bar", 1..1, 1..8);
+    assert_token!("baz", Identifier, "baz", 1..1, 1..4);
+    assert_token!("foo_bar", Identifier, "foo_bar", 1..1, 1..8);
+    assert_token!("foo_BAR", Identifier, "foo_BAR", 1..1, 1..8);
+    assert_token!("foo_123", Identifier, "foo_123", 1..1, 1..8);
+    assert_token!("foo_123a", Identifier, "foo_123a", 1..1, 1..9);
+    assert_token!("foo_123a_", Identifier, "foo_123a_", 1..1, 1..10);
+    assert_token!("_foo_123a", Identifier, "_foo_123a", 1..1, 1..10);
+    assert_token!("__foo_123a", Identifier, "__foo_123a", 1..1, 1..11);
+    assert_token!("_", Identifier, "_", 1..1, 1..2);
+    assert_token!("__", Identifier, "__", 1..1, 1..3);
+    assert_token!("_0", Identifier, "_0", 1..1, 1..3);
+    assert_token!("_9", Identifier, "_9", 1..1, 1..3);
+    assert_token!("__1", Identifier, "__1", 1..1, 1..4);
 
-    assert_token!("FOO", Identifier, "FOO", 1..=1, 1..=3);
-    assert_token!("FOO_bar", Identifier, "FOO_bar", 1..=1, 1..=7);
-    assert_token!("FOO_BAR", Identifier, "FOO_BAR", 1..=1, 1..=7);
-    assert_token!("FOO_123", Identifier, "FOO_123", 1..=1, 1..=7);
-    assert_token!("FOO_123a", Identifier, "FOO_123a", 1..=1, 1..=8);
-    assert_token!("FOO_123a_", Identifier, "FOO_123a_", 1..=1, 1..=9);
-    assert_token!("_FOO_123a", Identifier, "_FOO_123a", 1..=1, 1..=9);
-    assert_token!("__FOO_123a", Identifier, "__FOO_123a", 1..=1, 1..=10);
+    assert_token!("FOO", Identifier, "FOO", 1..1, 1..4);
+    assert_token!("FOO_bar", Identifier, "FOO_bar", 1..1, 1..8);
+    assert_token!("FOO_BAR", Identifier, "FOO_BAR", 1..1, 1..8);
+    assert_token!("FOO_123", Identifier, "FOO_123", 1..1, 1..8);
+    assert_token!("FOO_123a", Identifier, "FOO_123a", 1..1, 1..9);
+    assert_token!("FOO_123a_", Identifier, "FOO_123a_", 1..1, 1..10);
+    assert_token!("_FOO_123a", Identifier, "_FOO_123a", 1..1, 1..10);
+    assert_token!("__FOO_123a", Identifier, "__FOO_123a", 1..1, 1..11);
   }
 
   #[test]
   fn test_null_empty() {
     let mut scanner = scanner("");
 
-    assert_eq!(scanner.next_token(), token(Null, "", 1..=1, 1..=1));
+    assert_eq!(scanner.next_token(), token(Null, "", 1..1, 1..1));
   }
 
   #[test]
   fn test_null_token() {
     let mut scanner = scanner("  ");
 
-    assert_eq!(scanner.next_token(), token(Whitespace, "  ", 1..=1, 1..=2));
-    assert_eq!(scanner.next_token(), token(Null, "", 1..=1, 2..=2));
+    assert_eq!(scanner.next_token(), token(Whitespace, "  ", 1..1, 1..3));
+    assert_eq!(scanner.next_token(), token(Null, "", 1..1, 3..3));
   }
 
   #[test]
   fn test_null_after_newline() {
     let mut scanner = scanner("\n");
 
-    assert_eq!(scanner.next_token(), token(Whitespace, "\n", 1..=1, 1..=1));
-    assert_eq!(scanner.next_token(), token(Null, "", 2..=2, 1..=1));
+    assert_eq!(scanner.next_token(), token(Whitespace, "\n", 1..1, 1..2));
+    assert_eq!(scanner.next_token(), token(Null, "", 2..2, 1..1));
   }
 
   #[test]
   fn test_identifier_with_try_op() {
     let mut scanner = scanner("a?b");
 
-    assert_eq!(scanner.next_token(), token(Identifier, "a", 1..=1, 1..=1));
-    assert_eq!(scanner.next_token(), token(TryOp, "?", 1..=1, 2..=2));
-    assert_eq!(scanner.next_token(), token(Identifier, "b", 1..=1, 3..=3));
+    assert_eq!(scanner.next_token(), token(Identifier, "a", 1..1, 1..2));
+    assert_eq!(scanner.next_token(), token(TryOp, "?", 1..1, 2..3));
+    assert_eq!(scanner.next_token(), token(Identifier, "b", 1..1, 3..4));
   }
 }
