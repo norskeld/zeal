@@ -37,13 +37,8 @@ impl EscapeMap {
   }
 }
 
-/// The escape sequence literals supported by a single quoted string, and their replacement bytes.
-const SINGLE_ESCAPES: EscapeMap = EscapeMap::new()
-  .map(SINGLE_QUOTE, SINGLE_QUOTE)
-  .map(BACKSLASH, BACKSLASH);
-
-/// The escape sequence literals supported by a double quoted string, and their replacement bytes.
-const DOUBLE_ESCAPES: EscapeMap = EscapeMap::new()
+/// The escape sequence literals supported by a string literal, and their replacement bytes.
+const ESCAPES: EscapeMap = EscapeMap::new()
   .map(DOUBLE_QUOTE, DOUBLE_QUOTE)
   .map(SINGLE_QUOTE, SINGLE_QUOTE)
   .map(ZERO, NULL)
@@ -52,7 +47,7 @@ const DOUBLE_ESCAPES: EscapeMap = EscapeMap::new()
   .map(LOWER_N, NEWLINE)
   .map(LOWER_R, CARRIAGE_RETURN)
   .map(LOWER_T, TAB)
-  .map(BRACE_OPEN, BRACE_OPEN);
+  .map(DOLLAR, DOLLAR);
 
 /// Scanning state to help handle string interpolation and line continuation.
 #[derive(Copy, Clone)]
@@ -103,18 +98,38 @@ impl Scanner {
 
   pub fn next_token(&mut self) -> Token {
     match self.states.last().cloned() {
-      | Some(State::SingleString) => self.next_single_string_token(),
-      | Some(State::DoubleString) => self.next_double_string_token(),
+      | Some(State::SingleString) => {
+        self.next_string_token(SINGLE_QUOTE, TokenKind::SingleStringClose)
+      },
+      | Some(State::DoubleString) => {
+        self.next_string_token(DOUBLE_QUOTE, TokenKind::DoubleStringClose)
+      },
       | _ => self.next_ordinary_token(),
     }
   }
 
-  #[inline]
+  fn next_string_token(&mut self, quote: u8, close: TokenKind) -> Token {
+    match self.current_byte() {
+      | BACKSLASH => {
+        match self.next_byte() {
+          | LOWER_U if self.peek(2) == BRACE_OPEN => self.unicode_escape_token(),
+          | byte => self.escape_token(byte),
+        }
+      },
+      | DOLLAR if self.peek(1) == BRACE_OPEN => self.string_expression(),
+      | byte if byte == quote => {
+        self.states.pop();
+        self.single_character_token(close)
+      },
+      | _ if self.has_next() => self.double_string_text(quote),
+      | _ => self.null(),
+    }
+  }
+
   fn enter_state(&mut self, state: State) {
     self.states.push(state);
   }
 
-  #[inline]
   fn leave_state(&mut self) {
     self.states.pop();
   }
@@ -164,28 +179,23 @@ impl Scanner {
     self.position < self.max_position
   }
 
-  fn next_double_string_token(&mut self) -> Token {
-    match self.current_byte() {
-      | DOUBLE_QUOTE => {
-        self.leave_state();
-        self.single_character_token(TokenKind::DoubleStringClose)
-      },
-      | BACKSLASH if self.next_is_unicode_escape() => self.unicode_escape_token(),
-      | BRACE_OPEN => self.double_string_expression_open(),
-      | _ if self.has_next() => self.double_string_text(),
-      | _ => self.null(),
-    }
-  }
+  fn escape_token(&mut self, byte: u8) -> Token {
+    let (kind, replacement) = if let Some(replacement) = ESCAPES.get(byte) {
+      (TokenKind::StringEscape, replacement)
+    } else {
+      (TokenKind::InvalidEscape, byte)
+    };
 
-  fn next_single_string_token(&mut self) -> Token {
-    match self.current_byte() {
-      | SINGLE_QUOTE => {
-        self.leave_state();
-        self.single_character_token(TokenKind::SingleStringClose)
-      },
-      | _ if self.has_next() => self.single_string_text(),
-      | _ => self.null(),
-    }
+    let line = self.line;
+    let col = self.column;
+
+    self.position += 2;
+    self.column += 2;
+
+    let span = self.span(line, col);
+    let value = String::from_utf8_lossy(&[replacement]).into_owned();
+
+    Token::new(kind, value, span)
   }
 
   fn unicode_escape_token(&mut self) -> Token {
@@ -231,7 +241,7 @@ impl Scanner {
         .map(String::from);
 
       if let Some(parsed) = hex {
-        kind = TokenKind::UnicodeEscape;
+        kind = TokenKind::StringEscape;
         value = parsed;
       }
     }
@@ -330,7 +340,6 @@ impl Scanner {
     let mut kind = TokenKind::Integer;
 
     if first == ZERO && (second == LOWER_X || second == UPPER_X) {
-      // Advance 2 for "0x"
       self.position += 2;
 
       while let ZERO..=NINE | LOWER_A..=LOWER_F | UPPER_A..=UPPER_F | UNDERSCORE =
@@ -378,7 +387,6 @@ impl Scanner {
     self.advance_char();
     self.advance_char();
 
-    // The first space in a comment is ignored, so that a comment doesn't start with a space.
     if self.current_byte() == SPACE {
       self.advance_char();
     }
@@ -684,7 +692,7 @@ impl Scanner {
     self.identifier_or_keyword(start)
   }
 
-  fn single_string_text(&mut self) -> Token {
+  fn double_string_text(&mut self, quote: u8) -> Token {
     let kind = TokenKind::StringText;
 
     let mut buffer = Vec::new();
@@ -695,29 +703,16 @@ impl Scanner {
 
     while self.has_next() {
       match self.current_byte() {
-        | BACKSLASH => {
-          let next = self.next_byte();
-
-          if self.replace_escape_sequence(&mut buffer, next, &SINGLE_ESCAPES) {
-            continue;
-          }
-
-          buffer.push(BACKSLASH);
-
-          self.position += 1;
-        },
+        | BACKSLASH => break,
         | NEWLINE => {
           new_line = true;
           buffer.push(NEWLINE);
-
           break;
         },
-        | SINGLE_QUOTE => {
-          break;
-        },
+        | DOLLAR if self.peek(1) == BRACE_OPEN => break,
+        | byte if byte == quote => break,
         | byte => {
           buffer.push(byte);
-
           self.position += 1;
         },
       }
@@ -726,79 +721,17 @@ impl Scanner {
     self.string_text_token(kind, buffer, line, column, new_line)
   }
 
-  fn double_string_text(&mut self) -> Token {
-    let kind = TokenKind::StringText;
-
-    let mut buffer = Vec::new();
-    let mut new_line = false;
-
+  fn string_expression(&mut self) -> Token {
+    let start = self.position;
     let line = self.line;
-    let column = self.column;
 
-    while self.has_next() {
-      match self.current_byte() {
-        | BACKSLASH => {
-          if self.next_is_unicode_escape() {
-            break;
-          }
-
-          let next = self.next_byte();
-
-          if self.replace_escape_sequence(&mut buffer, next, &DOUBLE_ESCAPES) {
-            continue;
-          }
-
-          buffer.push(BACKSLASH);
-
-          self.position += 1;
-        },
-        | NEWLINE => {
-          new_line = true;
-          buffer.push(NEWLINE);
-
-          break;
-        },
-        | DOUBLE_QUOTE | BRACE_OPEN => {
-          break;
-        },
-        | byte => {
-          buffer.push(byte);
-
-          self.position += 1;
-        },
-      }
-    }
-
-    self.string_text_token(kind, buffer, line, column, new_line)
-  }
-
-  fn double_string_expression_open(&mut self) -> Token {
-    self.enter_state(State::Default);
-
+    self.states.push(State::Default);
     self.braces_stack.push(self.braces);
+
     self.braces += 1;
+    self.position += 2;
 
-    self.single_character_token(TokenKind::StringExprOpen)
-  }
-
-  fn replace_escape_sequence(
-    &mut self,
-    buffer: &mut Vec<u8>,
-    byte: u8,
-    replacements: &EscapeMap,
-  ) -> bool {
-    if let Some(replace) = replacements.get(byte) {
-      buffer.push(replace);
-
-      // The replacement is included in the buffer, meaning we'll also include it for advancing
-      // column numbers. As such we only need to advance for the backslash here.
-      self.column += 1;
-      self.position += 2;
-
-      true
-    } else {
-      false
-    }
+    self.token(TokenKind::StringExprOpen, start, line)
   }
 
   fn string_text_token(
@@ -830,10 +763,6 @@ impl Scanner {
     {
       self.position += 1
     }
-  }
-
-  fn next_is_unicode_escape(&self) -> bool {
-    self.next_byte() == LOWER_U && self.peek(2) == BRACE_OPEN
   }
 
   fn triple_operator(&mut self, kind: TokenKind, assign_kind: TokenKind) -> Token {
@@ -1186,25 +1115,49 @@ mod tests {
     assert_tokens!(
       "'foo\\xbar'",
       token(SingleStringOpen, "'", 1..1, 1..2),
-      token(StringText, "foo\\xbar", 1..1, 2..10),
+      token(StringText, "foo", 1..1, 2..5),
+      token(InvalidEscape, "x", 1..1, 5..7),
+      token(StringText, "bar", 1..1, 7..10),
       token(SingleStringClose, "'", 1..1, 10..11)
     );
     assert_tokens!(
       "'foo\\'bar'",
       token(SingleStringOpen, "'", 1..1, 1..2),
-      token(StringText, "foo\'bar", 1..1, 2..10),
+      token(StringText, "foo", 1..1, 2..5),
+      token(StringEscape, "'", 1..1, 5..7),
+      token(StringText, "bar", 1..1, 7..10),
       token(SingleStringClose, "'", 1..1, 10..11)
     );
     assert_tokens!(
       "'foo\\\\bar'",
       token(SingleStringOpen, "'", 1..1, 1..2),
-      token(StringText, "foo\\bar", 1..1, 2..10),
+      token(StringText, "foo", 1..1, 2..5),
+      token(StringEscape, "\\", 1..1, 5..7),
+      token(StringText, "bar", 1..1, 7..10),
       token(SingleStringClose, "'", 1..1, 10..11)
     );
     assert_tokens!(
       "'foo\\nbar'",
       token(SingleStringOpen, "'", 1..1, 1..2),
-      token(StringText, "foo\\nbar", 1..1, 2..10),
+      token(StringText, "foo", 1..1, 2..5),
+      token(StringEscape, "\n", 1..1, 5..7),
+      token(StringText, "bar", 1..1, 7..10),
+      token(SingleStringClose, "'", 1..1, 10..11)
+    );
+    assert_tokens!(
+      "'foo\\tbar'",
+      token(SingleStringOpen, "'", 1..1, 1..2),
+      token(StringText, "foo", 1..1, 2..5),
+      token(StringEscape, "\t", 1..1, 5..7),
+      token(StringText, "bar", 1..1, 7..10),
+      token(SingleStringClose, "'", 1..1, 10..11)
+    );
+    assert_tokens!(
+      "'foo\\rbar'",
+      token(SingleStringOpen, "'", 1..1, 1..2),
+      token(StringText, "foo", 1..1, 2..5),
+      token(StringEscape, "\r", 1..1, 5..7),
+      token(StringText, "bar", 1..1, 7..10),
       token(SingleStringClose, "'", 1..1, 10..11)
     );
     assert_tokens!(
@@ -1212,6 +1165,13 @@ mod tests {
       token(SingleStringOpen, "'", 1..1, 1..2),
       token(StringText, "\u{65}\u{301}", 1..1, 2..3),
       token(SingleStringClose, "'", 1..1, 3..4)
+    );
+    assert_tokens!(
+      "'\\${}'",
+      token(SingleStringOpen, "'", 1..1, 1..2),
+      token(StringEscape, "$", 1..1, 2..4),
+      token(StringText, "{}", 1..1, 4..6),
+      token(SingleStringClose, "'", 1..1, 6..7)
     );
     assert_tokens!("'", token(SingleStringOpen, "'", 1..1, 1..2));
     assert_tokens!(
@@ -1264,37 +1224,49 @@ mod tests {
     assert_tokens!(
       "\"foo\\xbar\"",
       token(DoubleStringOpen, "\"", 1..1, 1..2),
-      token(StringText, "foo\\xbar", 1..1, 2..10),
+      token(StringText, "foo", 1..1, 2..5),
+      token(InvalidEscape, "x", 1..1, 5..7),
+      token(StringText, "bar", 1..1, 7..10),
       token(DoubleStringClose, "\"", 1..1, 10..11)
     );
     assert_tokens!(
       "\"foo\\\"bar\"",
       token(DoubleStringOpen, "\"", 1..1, 1..2),
-      token(StringText, "foo\"bar", 1..1, 2..10),
+      token(StringText, "foo", 1..1, 2..5),
+      token(StringEscape, "\"", 1..1, 5..7),
+      token(StringText, "bar", 1..1, 7..10),
       token(DoubleStringClose, "\"", 1..1, 10..11)
     );
     assert_tokens!(
       "\"foo\\\\bar\"",
       token(DoubleStringOpen, "\"", 1..1, 1..2),
-      token(StringText, "foo\\bar", 1..1, 2..10),
+      token(StringText, "foo", 1..1, 2..5),
+      token(StringEscape, "\\", 1..1, 5..7),
+      token(StringText, "bar", 1..1, 7..10),
       token(DoubleStringClose, "\"", 1..1, 10..11)
     );
     assert_tokens!(
       "\"foo\\nbar\"",
       token(DoubleStringOpen, "\"", 1..1, 1..2),
-      token(StringText, "foo\nbar", 1..1, 2..10),
+      token(StringText, "foo", 1..1, 2..5),
+      token(StringEscape, "\n", 1..1, 5..7),
+      token(StringText, "bar", 1..1, 7..10),
       token(DoubleStringClose, "\"", 1..1, 10..11)
     );
     assert_tokens!(
       "\"foo\\tbar\"",
       token(DoubleStringOpen, "\"", 1..1, 1..2),
-      token(StringText, "foo\tbar", 1..1, 2..10),
+      token(StringText, "foo", 1..1, 2..5),
+      token(StringEscape, "\t", 1..1, 5..7),
+      token(StringText, "bar", 1..1, 7..10),
       token(DoubleStringClose, "\"", 1..1, 10..11)
     );
     assert_tokens!(
       "\"foo\\rbar\"",
       token(DoubleStringOpen, "\"", 1..1, 1..2),
-      token(StringText, "foo\rbar", 1..1, 2..10),
+      token(StringText, "foo", 1..1, 2..5),
+      token(StringEscape, "\r", 1..1, 5..7),
+      token(StringText, "bar", 1..1, 7..10),
       token(DoubleStringClose, "\"", 1..1, 10..11)
     );
     assert_tokens!(
@@ -1303,17 +1275,18 @@ mod tests {
       token(StringText, "\u{65}\u{301}", 1..1, 2..3),
       token(DoubleStringClose, "\"", 1..1, 3..4)
     );
+    assert_tokens!(
+      "\"\\${}\"",
+      token(DoubleStringOpen, "\"", 1..1, 1..2),
+      token(StringEscape, "$", 1..1, 2..4),
+      token(StringText, "{}", 1..1, 4..6),
+      token(DoubleStringClose, "\"", 1..1, 6..7)
+    );
     assert_tokens!("\"", token(DoubleStringOpen, "\"", 1..1, 1..2));
     assert_tokens!(
       "\"foo",
       token(DoubleStringOpen, "\"", 1..1, 1..2),
       token(StringText, "foo", 1..1, 2..5)
-    );
-    assert_tokens!(
-      "\"\\{}\"",
-      token(DoubleStringOpen, "\"", 1..1, 1..2),
-      token(StringText, "{}", 1..1, 2..5),
-      token(DoubleStringClose, "\"", 1..1, 5..6)
     );
   }
 
@@ -1322,14 +1295,14 @@ mod tests {
     assert_tokens!(
       "\"\\u{AC}\"",
       token(DoubleStringOpen, "\"", 1..1, 1..2),
-      token(UnicodeEscape, "\u{AC}", 1..1, 2..8),
+      token(StringEscape, "\u{AC}", 1..1, 2..8),
       token(DoubleStringClose, "\"", 1..1, 8..9)
     );
     assert_tokens!(
       "\"a\\u{AC}b\"",
       token(DoubleStringOpen, "\"", 1..1, 1..2),
       token(StringText, "a", 1..1, 2..3),
-      token(UnicodeEscape, "\u{AC}", 1..1, 3..9),
+      token(StringEscape, "\u{AC}", 1..1, 3..9),
       token(StringText, "b", 1..1, 9..10),
       token(DoubleStringClose, "\"", 1..1, 10..11)
     );
@@ -1337,7 +1310,7 @@ mod tests {
       "\"a\\u{FFFFF}b\"",
       token(DoubleStringOpen, "\"", 1..1, 1..2),
       token(StringText, "a", 1..1, 2..3),
-      token(UnicodeEscape, "\u{FFFFF}", 1..1, 3..12),
+      token(StringEscape, "\u{FFFFF}", 1..1, 3..12),
       token(StringText, "b", 1..1, 12..13),
       token(DoubleStringClose, "\"", 1..1, 13..14)
     );
@@ -1345,7 +1318,7 @@ mod tests {
       "\"a\\u{10FFFF}b\"",
       token(DoubleStringOpen, "\"", 1..1, 1..2),
       token(StringText, "a", 1..1, 2..3),
-      token(UnicodeEscape, "\u{10FFFF}", 1..1, 3..13),
+      token(StringEscape, "\u{10FFFF}", 1..1, 3..13),
       token(StringText, "b", 1..1, 13..14),
       token(DoubleStringClose, "\"", 1..1, 14..15)
     );
@@ -1392,40 +1365,40 @@ mod tests {
   #[test]
   fn test_double_string_with_expressions() {
     assert_tokens!(
-      "\"foo{10}baz\"",
+      "\"foo${10}baz\"",
       token(DoubleStringOpen, "\"", 1..1, 1..2),
       token(StringText, "foo", 1..1, 2..5),
-      token(StringExprOpen, "{", 1..1, 5..6),
-      token(Integer, "10", 1..1, 6..8),
-      token(StringExprClose, "}", 1..1, 8..9),
-      token(StringText, "baz", 1..1, 9..12),
-      token(DoubleStringClose, "\"", 1..1, 12..13)
+      token(StringExprOpen, "${", 1..1, 5..7),
+      token(Integer, "10", 1..1, 7..9),
+      token(StringExprClose, "}", 1..1, 9..10),
+      token(StringText, "baz", 1..1, 10..13),
+      token(DoubleStringClose, "\"", 1..1, 13..14)
     );
     assert_tokens!(
-      "\"{\"{10}\"}\"",
+      "\"${\"${10}\"}\"",
       token(DoubleStringOpen, "\"", 1..1, 1..2),
-      token(StringExprOpen, "{", 1..1, 2..3),
-      token(DoubleStringOpen, "\"", 1..1, 3..4),
-      token(StringExprOpen, "{", 1..1, 4..5),
-      token(Integer, "10", 1..1, 5..7),
-      token(StringExprClose, "}", 1..1, 7..8),
-      token(DoubleStringClose, "\"", 1..1, 8..9),
+      token(StringExprOpen, "${", 1..1, 2..4),
+      token(DoubleStringOpen, "\"", 1..1, 4..5),
+      token(StringExprOpen, "${", 1..1, 5..7),
+      token(Integer, "10", 1..1, 7..9),
       token(StringExprClose, "}", 1..1, 9..10),
-      token(DoubleStringClose, "\"", 1..1, 10..11)
+      token(DoubleStringClose, "\"", 1..1, 10..11),
+      token(StringExprClose, "}", 1..1, 11..12),
+      token(DoubleStringClose, "\"", 1..1, 12..13)
     );
   }
 
   #[test]
   fn test_double_string_with_unclosed_expression() {
     assert_tokens!(
-      "\"foo{10 +\"",
+      "\"foo${10 +\"",
       token(DoubleStringOpen, "\"", 1..1, 1..2),
       token(StringText, "foo", 1..1, 2..5),
-      token(StringExprOpen, "{", 1..1, 5..6),
-      token(Integer, "10", 1..1, 6..8),
-      token(Whitespace, " ", 1..1, 8..9),
-      token(Add, "+", 1..1, 9..10),
-      token(DoubleStringOpen, "\"", 1..1, 10..11)
+      token(StringExprOpen, "${", 1..1, 5..7),
+      token(Integer, "10", 1..1, 7..9),
+      token(Whitespace, " ", 1..1, 9..10),
+      token(Add, "+", 1..1, 10..11),
+      token(DoubleStringOpen, "\"", 1..1, 11..12)
     );
   }
 
